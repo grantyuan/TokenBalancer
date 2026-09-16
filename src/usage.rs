@@ -36,6 +36,19 @@ pub fn parse_openai_usage(body: &str) -> Option<UsageTokens> {
   })
 }
 
+/// Parse usage from a complete (non-stream) Anthropic message JSON body.
+pub fn parse_anthropic_message(body: &str) -> Option<UsageTokens> {
+  let v: Value = serde_json::from_str(body).ok()?;
+  let usage = v.get("usage")?;
+  Some(UsageTokens {
+    input: u64_of(&usage.get("input_tokens").unwrap_or(&Value::Null)),
+    cached: u64_of(&usage.get("cache_read_input_tokens").unwrap_or(&Value::Null))
+      + u64_of(&usage.get("cache_creation_input_tokens").unwrap_or(&Value::Null)),
+    output: u64_of(&usage.get("output_tokens").unwrap_or(&Value::Null)),
+    parse_error: false,
+  })
+}
+
 /// Parse usage from ONE SSE `data:` line of an OpenAI stream.
 /// Some(...) only when the line carries a `usage` object (final chunk with
 /// stream_options.include_usage); Ok(None) otherwise (incl. [DONE]).

@@ -138,6 +138,18 @@ pub fn account_monthly_quota(a: &AccountConf, d: &DefaultsConf) -> Option<f64> {
   None
 }
 
+/// 1st of the current month, unix seconds (UTC+8 zone — the CN Token Plan cycle).
+pub fn month_start_unix() -> i64 {
+  use chrono::{Datelike, TimeZone};
+  let off = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+  let local = off.from_utc_datetime(&chrono::Utc::now().naive_utc());
+  chrono::NaiveDate::from_ymd_opt(local.year(), local.month(), 1)
+    .and_then(|d| d.and_hms_opt(0, 0, 0))
+    .unwrap()
+    .and_utc()
+    .timestamp()
+}
+
 pub fn load_str(text: &str) -> anyhow::Result<Config> {
   let c: Config = toml::from_str(text)?;
   validate(&c)?;

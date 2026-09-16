@@ -74,6 +74,13 @@ impl Store {
     Ok(())
   }
 
+  pub fn patch_account(&self, id: &str, max_concurrent: u32, monthly_quota: f64, balance_unit: &str) -> anyhow::Result<()> {
+    self.conn.lock().unwrap().execute(
+      "UPDATE accounts SET max_concurrent=?1, monthly_quota=?2, balance_unit=?3 WHERE id=?4",
+      params![max_concurrent as i64, monthly_quota, balance_unit, id])?;
+    Ok(())
+  }
+
   pub fn set_flags(&self, id: &str, disabled: bool, exhausted: bool) -> anyhow::Result<()> {
     self.conn.lock().unwrap()
       .execute("UPDATE accounts SET disabled=?1, exhausted=?2 WHERE id=?3",

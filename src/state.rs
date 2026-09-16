@@ -27,12 +27,12 @@ pub struct RuntimeAccount {
   pub api_key: String,
   pub base_url_openai: String,
   pub base_url_anthropic: String,
-  pub unit: BalanceUnit,
-  pub quota: Option<f64>,      // in unit terms; None = unknown -> neutral pct 0.5
+  pub unit: Mutex<BalanceUnit>,
+  pub quota: Mutex<Option<f64>>,      // in unit terms; None = unknown -> neutral pct 0.5
   pub window_start_unix: i64,  // usage window start (cycle start)
-  pub max_concurrent: u32,
-  disabled: AtomicBool,
-  exhausted: AtomicBool,
+  pub max_concurrent: AtomicU32,
+  pub disabled: AtomicBool,
+  pub exhausted: AtomicBool,
   pub in_flight: AtomicU32,
   /// (at_unix, remaining in unit terms) — admin reconciliation baseline.
   reconciled: Mutex<Option<(i64, f64)>>,
@@ -128,10 +128,10 @@ impl Runtime {
         api_key: r.api_key,
         base_url_openai: r.base_url_openai,
         base_url_anthropic: r.base_url_anthropic,
-        unit,
-        quota: if r.monthly_quota > 0.0 { Some(r.monthly_quota) } else { None },
+        unit: Mutex::new(unit),
+        quota: Mutex::new(if r.monthly_quota > 0.0 { Some(r.monthly_quota) } else { None }),
         window_start_unix: parse_date_unix(&r.cycle_start).max(1).min(first_of_month(region)),
-        max_concurrent: r.max_concurrent,
+        max_concurrent: AtomicU32::new(r.max_concurrent),
         disabled: AtomicBool::new(r.disabled),
         exhausted: AtomicBool::new(r.exhausted),
         in_flight: AtomicU32::new(0),
@@ -171,13 +171,36 @@ impl Runtime {
     self.account(id).map(|a| a.in_flight.load(Ordering::Acquire)).unwrap_or(0)
   }
 
+  /// All accounts in stable index order.
+  pub fn iter_accounts(&self) -> Vec<std::sync::Arc<RuntimeAccount>> {
+    self.inner.accounts.iter().cloned().collect()
+  }
+
+  /// Admin field patch (persists to store, updates in-memory account).
+  pub fn patch(&self, id: &str, max_concurrent: Option<u32>, monthly_quota: Option<f64>, unit: Option<BalanceUnit>) {
+    if let Some(a) = self.account(id) {
+      if let Some(m) = max_concurrent { a.max_concurrent.store(m.max(1), Ordering::Release); }
+      if let Some(q) = monthly_quota { *a.quota.lock().unwrap() = if q > 0.0 { Some(q) } else { None }; }
+      if let Some(u) = unit { *a.unit.lock().unwrap() = u; }
+      let maxc = a.max_concurrent.load(Ordering::Acquire);
+      let quota = *a.quota.lock().unwrap();
+      let u = *a.unit.lock().unwrap();
+      let _ = self.inner.store.patch_account(
+        &a.id,
+        maxc,
+        quota.unwrap_or(0.0),
+        match u { BalanceUnit::Credits => "Credits", BalanceUnit::Tokens => "Tokens" },
+      );
+    }
+  }
+
   /// Try to take a concurrency slot for the account; None when at cap.
   pub fn try_acquire(&self, id: &str) -> Option<Slot> {
     let idx = *self.inner.id_to_idx.get(id)?;
     let acct = &self.inner.accounts[idx];
     loop {
       let cur = acct.in_flight.load(Ordering::Acquire);
-      if cur >= acct.max_concurrent { return None; }
+      if cur >= acct.max_concurrent.load(Ordering::Acquire) { return None; }
       match acct.in_flight.compare_exchange(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => return Some(Slot { acct: Arc::clone(acct) }),
         Err(_) => continue,
@@ -193,7 +216,7 @@ impl Runtime {
         idx: i,
         remaining_pct: pct,
         in_flight: a.in_flight.load(Ordering::Acquire),
-        max_concurrent: a.max_concurrent,
+        max_concurrent: a.max_concurrent.load(Ordering::Acquire),
         disabled: a.disabled.load(Ordering::Acquire),
         exhausted: a.exhausted.load(Ordering::Acquire),
       }
@@ -206,16 +229,18 @@ impl Runtime {
     let window_sum = self.inner.store
       .sum_since(&a.id, a.window_start_unix)
       .unwrap_or((0, 0, 0, 0.0, 0));
-    let consumed = unit_consumption(&a.unit, &window_sum);
+    let unit = *a.unit.lock().unwrap();
+    let consumed = unit_consumption(&unit, &window_sum);
+    let quota = *a.quota.lock().unwrap();
     let rem = match *a.reconciled.lock().unwrap() {
       Some((at_unix, rem0)) if at_unix >= a.window_start_unix => {
         // reconciliation baseline: true remaining at `at_unix`, minus what flowed after
         let post = self.inner.store.sum_since(&a.id, at_unix).unwrap_or((0, 0, 0, 0.0, 0));
-        (rem0 - unit_consumption(&a.unit, &post)).max(0.0)
+        (rem0 - unit_consumption(&unit, &post)).max(0.0)
       }
-      _ => (a.quota.unwrap_or(0.0) - consumed).max(0.0),
+      _ => (quota.unwrap_or(0.0) - consumed).max(0.0),
     };
-    let pct = match a.quota {
+    let pct = match quota {
       Some(q) if q > 0.0 => (rem / q).clamp(0.0, 1.0),
       _ => 0.5, // unknown quota: neutral — neither favored nor starved
     };
