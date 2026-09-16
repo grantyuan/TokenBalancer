@@ -490,7 +490,8 @@ fn accounts_upsert_and_flags() {
   let s = Store::open(":memory:").unwrap();
   s.upsert_account(&acct("a1")).unwrap();
   let rows = s.list_accounts().unwrap();
-  assert_eq!(rows.len(), 1) && assert_eq!(rows[0].id, "a1");
+  assert_eq!(rows.len(), 1);
+  assert_eq!(rows[0].id, "a1");
   // upsert again with different static fields keeps flags
   let mut a2 = acct("a1"); a2.label = "new".into(); a2.max_concurrent = 5;
   s.set_flags("a1", true, false).unwrap();
@@ -667,7 +668,7 @@ impl Store {
     let mut it = st.query_map(params![key], |r| {
       Ok(UserRow { id: r.get(0)?, key: r.get(1)?, name: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0 })
     })?;
-    Ok(it.next().transpose().ok())
+    Ok(it.next().transpose()?)
   }
 
   pub fn find_live_user_by_key(&self, key: &str) -> anyhow::Result<Option<UserRow>> {
