@@ -3309,9 +3309,9 @@ use serde_json::{json, Value};
 
 // ---------- mock upstream (single server; accounts distinguished by Bearer key) ----------
 const SSE_FINAL: &str = concat!(
-  "data: {\\\"id\\\":\\\"x\\\",\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"hi\\\"}}]}\\n\\n",
-  "data: {\\\"id\\\":\\\"x\\\",\\\"choices\\\":[],\\\"usage\\\":{\\\"prompt_tokens\\\":300,\\\"completion_tokens\\\":150,\\\"total_tokens\\\":450}}\\n\\n",
-  "data: [DONE]\\n\\n"
+  "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+  "data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"prompt_tokens\":300,\"completion_tokens\":150,\"total_tokens\":450}}\n\n",
+  "data: [DONE]\n\n"
 );
 
 #[derive(Clone)]
@@ -3380,7 +3380,7 @@ async fn start(a_quota: Option<f64>, a_max: u32, b_quota: Option<f64>, b_max: u3
   let store = Arc::new(tokenbalancer::store::Store::open(":memory:").unwrap());
   let cfg = tokenbalancer::config::Config {
     server: tokenbalancer::config::ServerConf { listen: "127.0.0.1:0".into(), admin_key: "tba_e2e".into(), db_path: ":memory:".into(), queue_timeout_secs: 5 },
-    defaults: tokenbalancer::config::DefaultsConf { region: tokenbalancer::config::Region::Cn, balance_unit: tokenbalancer::config::BalanceUnit::Tokens, max_concurrent: 2 },
+    defaults: tokenbalancer::config::DefaultsConf { region: tokenbalancer::config::Region::Cn, balance_unit: tokenbalancer::config::BalanceUnit::Credits, max_concurrent: 2 },
     accounts: vec![
       account_conf("A", "sk-sp-A", &base, a_quota, a_max),
       account_conf("B", "sk-sp-B", &base, b_quota, b_max),
@@ -3486,7 +3486,7 @@ async fn concurrency_cap_queues_then_proceeds() {
 }
 
 async fn start_single() -> Harness {
-  // single-account variant: A max_concurrent=1 quota 10_000
+  // single-account variant: A max_concurrent=1 quota 10_000 credits
   let mock = Mock { calls: Arc::new(std::sync::Mutex::new(Vec::new())), mode: Arc::new(std::sync::Mutex::new("ok".into())) };
   let mock_app = Router::new().route("/*rest", post(mock_handler)).with_state(mock.clone());
   let ml = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3497,7 +3497,7 @@ async fn start_single() -> Harness {
   let store = Arc::new(tokenbalancer::store::Store::open(":memory:").unwrap());
   let cfg = tokenbalancer::config::Config {
     server: tokenbalancer::config::ServerConf { listen: "127.0.0.1:0".into(), admin_key: "tba".into(), db_path: ":memory:".into(), queue_timeout_secs: 5 },
-    defaults: tokenbalancer::config::DefaultsConf { region: tokenbalancer::config::Region::Cn, balance_unit: tokenbalancer::config::BalanceUnit::Tokens, max_concurrent: 2 },
+    defaults: tokenbalancer::config::DefaultsConf { region: tokenbalancer::config::Region::Cn, balance_unit: tokenbalancer::config::BalanceUnit::Credits, max_concurrent: 2 },
     accounts: vec![account_conf("A", "sk-sp-A", &base, Some(10_000.0), 1)],
     credit_rates: Default::default(),
     users: vec![tokenbalancer::config::UserConf { key: "tbu_e2e".into(), name: "t".into() }],
