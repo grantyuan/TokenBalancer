@@ -1,0 +1,13 @@
+# Rust
+/target
+
+# Runtime data
+/data/
+*.sqlite
+*.sqlite-*
+
+# Local config with real keys
+/config.local.toml
+
+# Worktrees
+.worktrees/
