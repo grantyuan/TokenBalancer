@@ -61,7 +61,7 @@ impl Default for DefaultsConf {
   fn default() -> Self { Self { region: Region::default(), balance_unit: BalanceUnit::default(), max_concurrent: default_maxc() } }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ModalityRates {
   /// Tokens per credit for each modality (higher = cheaper).
   #[serde(default = "def_input")] pub input: f64,
@@ -71,6 +71,9 @@ pub struct ModalityRates {
 fn def_input() -> f64 { 500.0 }
 fn def_cached() -> f64 { 2500.0 }
 fn def_output() -> f64 { 100.0 }
+impl Default for ModalityRates {
+  fn default() -> Self { Self { input: def_input(), cached: def_cached(), output: def_output() } }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreditRatesConf {
