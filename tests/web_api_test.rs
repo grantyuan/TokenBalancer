@@ -89,3 +89,20 @@ async fn static_ui_served() {
   assert_eq!(r.status(), StatusCode::OK);
   assert!(r.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().contains("text/html"));
 }
+#[tokio::test]
+async fn ui_assets_contain_expected_content() {
+  let r = app().await.oneshot(get("/", None)).await.unwrap();
+  let body = axum::body::to_bytes(r.into_body(), 100_000).await.unwrap();
+  let html = String::from_utf8_lossy(&body);
+  assert!(html.contains("TokenBalancer"));
+  assert!(html.contains("/app.js"));
+
+  let r = app().await.oneshot(get("/app.js", None)).await.unwrap();
+  let body = axum::body::to_bytes(r.into_body(), 200_000).await.unwrap();
+  let js = String::from_utf8_lossy(&body);
+  assert!(js.contains("/api/whoami"));
+  assert!(js.contains("/api/admin/accounts"));
+
+  let r = app().await.oneshot(get("/styles.css", None)).await.unwrap();
+  assert!(r.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().contains("text/css"));
+}
