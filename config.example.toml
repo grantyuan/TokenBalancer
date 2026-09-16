@@ -1,0 +1,47 @@
+# TokenBalancer configuration — all Token Plan keys live here (keep this file private!).
+[server]
+listen = "0.0.0.0:8787"
+admin_key = "tba_replace_me"        # grants web-admin + may also proxy (attribution "admin")
+db_path = "data/tokenbalancer.sqlite"
+queue_timeout_secs = 5              # wait for a free slot before 503
+
+[defaults]
+region = "cn"                       # "cn" (千问云) or "intl" (QwenCloud)
+balance_unit = "tokens"             # "tokens" or "credits"
+max_concurrent = 2                  # max simultaneous requests per account
+
+# Each Token Plan seat key (sk-sp-...) becomes one account.
+[[accounts]]
+id = "seat-a"
+label = "张三-标准席"
+api_key = "sk-sp_replace_me_1"
+region = "cn"
+seat_tier = "standard"              # standard|pro|max → default quota
+# monthly_quota = 25000             # explicit override, in balance_unit terms
+# cycle_start = "2026-09-01"        # usage window start (default: 1st of month, UTC+8)
+# max_concurrent = 2
+# balance_unit = "credits"
+# base_url_openai = "..."           # per-account base URL override (rare)
+# disabled = false
+
+[[accounts]]
+id = "seat-b"
+api_key = "sk-sp_replace_me_2"
+region = "intl"
+monthly_quota = 10000000            # tokens (balance_unit=tokens default)
+
+# token->credit rates (tokens per credit). Defaults are conservative.
+[credit_rates.default]
+input = 500
+cached = 2500
+output = 100
+
+[credit_rates.models."qwen3.7-max"]
+input = 250
+cached = 1250
+output = 40
+
+# Optional seed users (proxy keys). More are created in the web UI (stored in DB).
+[[users]]
+key = "tbu_alice"
+name = "alice"
