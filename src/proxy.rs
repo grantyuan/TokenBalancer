@@ -42,12 +42,12 @@ pub fn router(state: AppState) -> Router {
     .route("/api/me/usage", get(crate::web::me_usage))
     .route("/api/admin/accounts", get(crate::web::admin_accounts))
     .route("/api/admin/users", get(crate::web::admin_users).post(crate::web::admin_create_user))
-    .route("/api/admin/users/{key}/revoke", axum::routing::post(crate::web::admin_revoke_user))
-    .route("/api/admin/accounts/{id}", axum::routing::patch(crate::web::admin_patch_account))
-    .route("/api/admin/accounts/{id}/reconcile", axum::routing::post(crate::web::admin_reconcile))
-    .route("/api/admin/accounts/{id}/clear-exhausted", axum::routing::post(crate::web::admin_clear_exhausted))
+    .route("/api/admin/users/:key/revoke", axum::routing::post(crate::web::admin_revoke_user))
+    .route("/api/admin/accounts/:id", axum::routing::patch(crate::web::admin_patch_account))
+    .route("/api/admin/accounts/:id/reconcile", axum::routing::post(crate::web::admin_reconcile))
+    .route("/api/admin/accounts/:id/clear-exhausted", axum::routing::post(crate::web::admin_clear_exhausted))
     .route("/api/admin/analytics", get(crate::web::admin_analytics))
-    .route("/{*rest}", any(proxy_handler))
+    .route("/*rest", any(proxy_handler))
     .with_state(state)
 }
 

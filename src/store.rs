@@ -182,4 +182,52 @@ impl Store {
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
   }
+
+  /// (key, input, cached, output, credits, count) grouped by a whitelisted column, since unix ts.
+  pub fn group_since(&self, col: &str, since_unix: i64) -> anyhow::Result<Vec<(String, u64, u64, u64, f64, u64)>> {
+    let col = match col { "user_id" | "account_id" | "model" => col, _ => return Err(anyhow::anyhow!("bad column")) };
+    let since = DateTime::<Utc>::from_timestamp(since_unix, 0).unwrap_or_default().to_rfc3339();
+    let c = self.conn.lock().unwrap();
+    let sql = format!("SELECT {col}, COALESCE(SUM(input),0), COALESCE(SUM(cached),0), COALESCE(SUM(output),0), COALESCE(SUM(credits),0.0), COUNT(*) FROM usage_events WHERE ts>=?1 GROUP BY {col} ORDER BY 6 DESC");
+    let mut st = c.prepare(&sql)?;
+    let rows = st.query_map(params![since], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64,
+         r.get::<_, i64>(3)? as u64, r.get::<_, f64>(4)?, r.get::<_, i64>(5)? as u64))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+  }
+
+  /// Totals for one user since unix ts: (input, cached, output, credits, count).
+  pub fn totals_for(&self, user_id: &str, since_unix: i64) -> anyhow::Result<(u64, u64, u64, f64, u64)> {
+    let since = DateTime::<Utc>::from_timestamp(since_unix, 0).unwrap_or_default().to_rfc3339();
+    let c = self.conn.lock().unwrap();
+    let (i, ca, o, cr, n) = c.query_row(
+      "SELECT COALESCE(SUM(input),0), COALESCE(SUM(cached),0), COALESCE(SUM(output),0), COALESCE(SUM(credits),0.0), COUNT(*) FROM usage_events WHERE user_id=?1 AND ts>=?2",
+      params![user_id, since],
+      |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64, r.get::<_, f64>(3)?, r.get::<_, i64>(4)? as u64)))?;
+    Ok((i, ca, o, cr, n))
+  }
+
+  /// Daily rows for one user: (date, events, input, output, credits).
+  pub fn daily_for(&self, user_id: &str, from_unix: i64, to_unix: i64) -> anyhow::Result<Vec<(String, u64, u64, u64, f64)>> {
+    let f = DateTime::<Utc>::from_timestamp(from_unix, 0).unwrap_or_default().to_rfc3339();
+    let t = DateTime::<Utc>::from_timestamp(to_unix, 0).unwrap_or_default().to_rfc3339();
+    let c = self.conn.lock().unwrap();
+    let mut st = c.prepare("SELECT substr(ts,1,10) d, COUNT(*), COALESCE(SUM(input),0), COALESCE(SUM(output),0), COALESCE(SUM(credits),0.0) FROM usage_events WHERE user_id=?1 AND ts>=?2 AND ts<?3 GROUP BY d ORDER BY d")?;
+    let rows = st.query_map(params![user_id, f, t], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64, r.get::<_, i64>(3)? as u64, r.get::<_, f64>(4)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+  }
+
+  /// Top models for one user: (model, events, input+output, credits).
+  pub fn top_models_for(&self, user_id: &str, since_unix: i64, limit: u32) -> anyhow::Result<Vec<(String, u64, u64, f64)>> {
+    let since = DateTime::<Utc>::from_timestamp(since_unix, 0).unwrap_or_default().to_rfc3339();
+    let c = self.conn.lock().unwrap();
+    let mut st = c.prepare("SELECT model, COUNT(*), COALESCE(SUM(input + output),0), COALESCE(SUM(credits),0.0) FROM usage_events WHERE user_id=?1 AND ts>=?2 GROUP BY model ORDER BY 3 DESC LIMIT ?3")?;
+    let rows = st.query_map(params![user_id, since, limit as i64], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64, r.get::<_, f64>(3)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+  }
 }
