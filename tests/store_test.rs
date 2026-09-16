@@ -1,6 +1,6 @@
 // tests/store_test.rs
 use tokenbalancer::store::*;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 
 fn acct(id: &str) -> AccountRow {
   AccountRow { id: id.into(), label: "l".into(), api_key: "sk-sp-x".into(), region: "cn".into(),
@@ -57,4 +57,31 @@ fn events_and_sums() {
   // future since -> nothing
   let (i2, _, _, _, n2) = s.sum_since("a1", Utc::now().timestamp() + 3600).unwrap();
   assert_eq!((i2, n2), (0, 0));
+}
+
+#[test]
+fn daily_stats_aggregates_by_day() {
+  let s = Store::open(":memory:").unwrap();
+  s.upsert_account(&acct("a1")).unwrap();
+  let d1a = Utc.with_ymd_and_hms(2026, 9, 15, 8, 0, 0).unwrap();
+  let d1b = Utc.with_ymd_and_hms(2026, 9, 15, 18, 0, 0).unwrap();
+  let d2 = Utc.with_ymd_and_hms(2026, 9, 16, 9, 0, 0).unwrap();
+  s.insert_event(&UsageEvent { ts: d1a, user_id: "u1".into(), account_id: "a1".into(),
+    model: "qwen3.7-max".into(), input: 100, cached: 20, output: 50, credits: 0.5,
+    latency_ms: 120, status: 200, stream: true, parse_error: false }).unwrap();
+  s.insert_event(&UsageEvent { ts: d1b, user_id: "u1".into(), account_id: "a1".into(),
+    model: "qwen3.7-max".into(), input: 300, cached: 0, output: 100, credits: 1.2,
+    latency_ms: 80, status: 200, stream: false, parse_error: false }).unwrap();
+  s.insert_event(&UsageEvent { ts: d2, user_id: "u1".into(), account_id: "a1".into(),
+    model: "qwen3.7-max".into(), input: 50, cached: 5, output: 25, credits: 0.3,
+    latency_ms: 60, status: 200, stream: false, parse_error: false }).unwrap();
+  let from = Utc.with_ymd_and_hms(2026, 9, 15, 0, 0, 0).unwrap().timestamp();
+  let to = Utc.with_ymd_and_hms(2026, 9, 17, 0, 0, 0).unwrap().timestamp();
+  let rows = s.daily_stats(from, to).unwrap();
+  assert_eq!(rows.len(), 2);
+  assert_eq!(rows[0], ("2026-09-15".to_string(), 2u64, 400u64, 20u64, 150u64));
+  assert_eq!(rows[1], ("2026-09-16".to_string(), 1u64, 50u64, 5u64, 25u64));
+  // out-of-window -> empty
+  let rows = s.daily_stats(from + 86400 * 10, from + 86400 * 11).unwrap();
+  assert!(rows.is_empty());
 }
