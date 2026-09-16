@@ -2140,12 +2140,12 @@ pub fn router(state: AppState) -> Router {
     .route("/api/me/usage", get(crate::web::me_usage))
     .route("/api/admin/accounts", get(crate::web::admin_accounts))
     .route("/api/admin/users", get(crate::web::admin_users).post(crate::web::admin_create_user))
-    .route("/api/admin/users/{key}/revoke", axum::routing::post(crate::web::admin_revoke_user))
-    .route("/api/admin/accounts/{id}", axum::routing::patch(crate::web::admin_patch_account))
-    .route("/api/admin/accounts/{id}/reconcile", axum::routing::post(crate::web::admin_reconcile))
-    .route("/api/admin/accounts/{id}/clear-exhausted", axum::routing::post(crate::web::admin_clear_exhausted))
+    .route("/api/admin/users/:key/revoke", axum::routing::post(crate::web::admin_revoke_user))
+    .route("/api/admin/accounts/:id", axum::routing::patch(crate::web::admin_patch_account))
+    .route("/api/admin/accounts/:id/reconcile", axum::routing::post(crate::web::admin_reconcile))
+    .route("/api/admin/accounts/:id/clear-exhausted", axum::routing::post(crate::web::admin_clear_exhausted))
     .route("/api/admin/analytics", get(crate::web::admin_analytics))
-    .route("/{*rest}", any(proxy_handler))
+    .route("/*rest", any(proxy_handler))
     .with_state(state)
 }
 
@@ -2526,7 +2526,7 @@ git commit -m "feat: proxy routing, auth, balancing with queue, stream relay (T9
 ```rust
 // tests/web_api_test.rs
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, Method, Request, StatusCode};
 use tower::ServiceExt; // oneshot
 
 async fn app() -> axum::Router {
@@ -2578,7 +2578,7 @@ async fn create_and_revoke_user() {
   // one app instance for the whole flow (Router is Clone; every app() call
   // would otherwise be a fresh in-memory DB)
   let app = app().await;
-  let r = app.clone().oneshot(Request::builder().uri("/api/admin/users")
+  let r = app.clone().oneshot(Request::builder().method(Method::POST).uri("/api/admin/users")
     .header(header::AUTHORIZATION, "Bearer tba_admin")
     .header(header::CONTENT_TYPE, "application/json")
     .body(Body::from(r#"{"name":"bob"}"#)).unwrap()).await.unwrap();
@@ -2591,7 +2591,7 @@ async fn create_and_revoke_user() {
   let r = app.clone().oneshot(get("/api/whoami", Some(&key))).await.unwrap();
   assert_eq!(r.status(), StatusCode::OK);
   // revoke it
-  let r = app.clone().oneshot(Request::builder().uri(format!("/api/admin/users/{key}/revoke"))
+  let r = app.clone().oneshot(Request::builder().method(Method::POST).uri(format!("/api/admin/users/{key}/revoke"))
     .header(header::AUTHORIZATION, "Bearer tba_admin")
     .body(Body::empty()).unwrap()).await.unwrap();
   assert_eq!(r.status(), StatusCode::OK);
@@ -2602,7 +2602,7 @@ async fn create_and_revoke_user() {
 
 #[tokio::test]
 async fn reconcile_reflects_in_accounts() {
-  let r = app().await.oneshot(Request::builder().uri("/api/admin/accounts/a1/reconcile")
+  let r = app().await.oneshot(Request::builder().method(Method::POST).uri("/api/admin/accounts/a1/reconcile")
     .header(header::AUTHORIZATION, "Bearer tba_admin")
     .header(header::CONTENT_TYPE, "application/json")
     .body(Body::from(r#"{"remaining": 42000}"#)).unwrap()).await.unwrap();
@@ -3370,7 +3370,7 @@ fn account_conf(id: &str, key: &str, base: &str, quota: Option<f64>, maxc: u32) 
 
 async fn start(a_quota: Option<f64>, a_max: u32, b_quota: Option<f64>, b_max: u32) -> Harness {
   let mock = Mock { calls: Arc::new(std::sync::Mutex::new(Vec::new())), mode: Arc::new(std::sync::Mutex::new("ok".into())) };
-  let mock_app = Router::new().route("/{*rest}", post(mock_handler)).with_state(mock.clone());
+  let mock_app = Router::new().route("/*rest", post(mock_handler)).with_state(mock.clone());
   let ml = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
   let mport = ml.local_addr().unwrap().port();
   tokio::spawn(axum::serve(ml, mock_app));
@@ -3488,7 +3488,7 @@ async fn concurrency_cap_queues_then_proceeds() {
 async fn start_single() -> Harness {
   // single-account variant: A max_concurrent=1 quota 10_000
   let mock = Mock { calls: Arc::new(std::sync::Mutex::new(Vec::new())), mode: Arc::new(std::sync::Mutex::new("ok".into())) };
-  let mock_app = Router::new().route("/{*rest}", post(mock_handler)).with_state(mock.clone());
+  let mock_app = Router::new().route("/*rest", post(mock_handler)).with_state(mock.clone());
   let ml = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
   let mport = ml.local_addr().unwrap().port();
   tokio::spawn(axum::serve(ml, mock_app));
