@@ -101,4 +101,95 @@ fn rejects_empty_admin_key() {
   // minimal: config with [server] but no admin_key must fail
   let r = load_str("# no admin key\n[server]\n");
   assert!(r.is_err());
+  let msg = r.unwrap_err().to_string();
+  assert!(msg.contains("admin_key"), "error should mention admin_key: {msg}");
+}
+
+#[test]
+fn rejects_empty_api_key() {
+  let r = load_str(
+    r#"
+[server]
+admin_key = "tba_ok"
+
+[[accounts]]
+id = "bad-acct"
+api_key = ""
+"#);
+  assert!(r.is_err());
+  let msg = r.unwrap_err().to_string();
+  assert!(msg.contains("bad-acct"), "error should mention the account id: {msg}");
+}
+
+// ---- helper resolution tests ----
+
+fn test_defaults() -> DefaultsConf {
+  DefaultsConf { region: Region::Cn, balance_unit: BalanceUnit::Tokens, max_concurrent: 2 }
+}
+
+fn test_account() -> AccountConf {
+  AccountConf {
+    id: "a".into(),
+    label: None,
+    api_key: "sk-sp-test".into(),
+    region: None,
+    base_url_openai: None,
+    base_url_anthropic: None,
+    seat_tier: None,
+    balance_unit: None,
+    monthly_quota: None,
+    cycle_start: None,
+    max_concurrent: None,
+    disabled: None,
+  }
+}
+
+#[test]
+fn helper_account_region() {
+  let d = test_defaults();
+  let mut a = test_account();
+  assert_eq!(account_region(&a, &d), Region::Cn); // falls back to defaults
+  a.region = Some(Region::Intl);
+  assert_eq!(account_region(&a, &d), Region::Intl); // account override wins
+}
+
+#[test]
+fn helper_account_balance_unit() {
+  let d = test_defaults();
+  let mut a = test_account();
+  assert_eq!(account_balance_unit(&a, &d), BalanceUnit::Tokens);
+  a.balance_unit = Some(BalanceUnit::Credits);
+  assert_eq!(account_balance_unit(&a, &d), BalanceUnit::Credits);
+}
+
+#[test]
+fn helper_account_max_concurrent() {
+  let d = test_defaults();
+  let mut a = test_account();
+  assert_eq!(account_max_concurrent(&a, &d), 2); // falls back to defaults
+  a.max_concurrent = Some(7);
+  assert_eq!(account_max_concurrent(&a, &d), 7); // account override wins
+}
+
+#[test]
+fn helper_account_monthly_quota() {
+  let d = test_defaults(); // Cn / tokens / 2
+  // (a) explicit monthly_quota wins even when a seat_tier is also set
+  let mut a = test_account();
+  a.monthly_quota = Some(123.0);
+  a.seat_tier = Some(SeatTier::Pro);
+  assert_eq!(account_monthly_quota(&a, &d), Some(123.0));
+  // (b) Pro tier in credits unit -> 100_000.0
+  let mut d_credits = test_defaults();
+  d_credits.balance_unit = BalanceUnit::Credits;
+  let mut b = test_account();
+  b.seat_tier = Some(SeatTier::Pro);
+  assert_eq!(account_monthly_quota(&b, &d_credits), Some(100_000.0));
+  // (c) Standard tier in tokens unit -> 25_000 * 1000 = 25_000_000.0
+  let mut c = test_account();
+  c.seat_tier = Some(SeatTier::Standard);
+  assert_eq!(account_monthly_quota(&c, &d), Some(25_000_000.0));
+  // (d) neither quota nor tier -> None
+  let n = test_account();
+  assert_eq!(account_monthly_quota(&n, &d), None);
 }

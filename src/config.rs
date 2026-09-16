@@ -142,7 +142,9 @@ pub fn load_str(text: &str) -> anyhow::Result<Config> {
 }
 pub fn load(path: &str) -> anyhow::Result<Config> {
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?;
-    load_str(&text)
+    let c: Config = toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse {path}: {e}"))?;
+    validate(&c)?;
+    Ok(c)
 }
 fn validate(c: &Config) -> anyhow::Result<()> {
   if c.server.admin_key.is_empty() { anyhow::bail!("server.admin_key is required"); }
