@@ -1,6 +1,10 @@
 // src/usage.rs
 use serde_json::Value;
 
+/// Upstream protocol family for an account/stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol { OpenAi, Anthropic }
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UsageTokens {
   /// Total input tokens (OpenAI: prompt_tokens; Anthropic: input_tokens).
@@ -110,17 +114,63 @@ impl AnthropicStreamParser {
     }
   }
 
-  pub fn finish(self) -> UsageTokens {
+  pub fn is_complete(&self) -> bool { self.saw_start && self.saw_delta }
+
+  /// Consume accumulated usage. Returns missing() if not complete or already taken.
+  pub fn take(&mut self) -> UsageTokens {
     if self.saw_start && self.saw_delta {
-      UsageTokens { input: self.input, cached: self.cached, output: self.output, parse_error: false }
+      let u = UsageTokens { input: self.input, cached: self.cached, output: self.output, parse_error: false };
+      self.saw_start = false;
+      self.saw_delta = false;
+      u
     } else {
       UsageTokens::missing()
     }
   }
+
+  pub fn finish(mut self) -> UsageTokens { self.take() }
 }
 
 /// First index i such that hay[i..i+needle.len()] == needle, else None.
 fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
   if needle.len() > hay.len() { return None; }
   (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+}
+
+/// One-shot usage capture for a relayed SSE stream. Feed upstream bytes in any
+/// chunking; feed() returns the UsageTokens exactly once when known.
+pub struct SseTap {
+  proto: Protocol,
+  line_buf: Vec<u8>,
+  openai_done: Option<UsageTokens>,
+  anthropic: AnthropicStreamParser,
+}
+
+impl SseTap {
+  pub fn new(proto: Protocol) -> Self {
+    Self { proto, line_buf: Vec::new(), openai_done: None, anthropic: AnthropicStreamParser::new() }
+  }
+
+  pub fn feed(&mut self, chunk: &[u8]) -> Option<UsageTokens> {
+    match self.proto {
+      Protocol::OpenAi => {
+        if self.openai_done.is_some() { return None; }
+        self.line_buf.extend_from_slice(chunk);
+        while let Some(nl) = self.line_buf.iter().position(|b| *b == b'\n') {
+          let line_bytes: Vec<u8> = self.line_buf.drain(..=nl).collect();
+          let line = String::from_utf8_lossy(&line_bytes);
+          match parse_openai_usage_from_sse(line.trim()) {
+            Ok(Some(u)) => { self.openai_done = Some(u); return Some(u); }
+            Ok(None) => {}
+            Err(_) => { /* partial/garbled line mid-stream; ignore */ }
+          }
+        }
+        None
+      }
+      Protocol::Anthropic => {
+        self.anthropic.feed(chunk);
+        if self.anthropic.is_complete() { Some(self.anthropic.take()) } else { None }
+      }
+    }
+  }
 }

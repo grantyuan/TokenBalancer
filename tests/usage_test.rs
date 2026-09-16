@@ -1,5 +1,6 @@
 // tests/usage_test.rs
-use tokenbalancer::usage::{parse_openai_usage, parse_openai_usage_from_sse, AnthropicStreamParser, UsageTokens};
+use tokenbalancer::forward::Protocol;
+use tokenbalancer::usage::{parse_openai_usage, parse_openai_usage_from_sse, AnthropicStreamParser, SseTap, UsageTokens};
 
 #[test]
 fn parse_openai_json_body() {
@@ -79,4 +80,54 @@ fn parse_anthropic_no_usage_is_error() {
   p.feed(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
   let u = p.finish();
   assert!(u.parse_error);
+}
+
+#[test]
+fn openai_tap_captures_final_usage_once() {
+  let stream = concat!(
+    "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+    "data: {\"id\":\"x\",\"choices\":[]}\n\n",
+    "data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"prompt_tokens\":300,\"completion_tokens\":150,\"total_tokens\":450}}\n\n",
+    "data: [DONE]\n\n"
+  );
+  let mut tap = SseTap::new(Protocol::OpenAi);
+  let mut captured = Vec::new();
+  for chunk in stream.as_bytes().chunks(13) {
+    if let Some(u) = tap.feed(chunk) { captured.push(u); }
+  }
+  assert_eq!(captured.len(), 1, "usage must be captured exactly once");
+  assert_eq!(captured[0].input, 300);
+  assert_eq!(captured[0].output, 150);
+  // feeding more after capture yields nothing
+  assert!(tap.feed(b"junk").is_none());
+}
+
+#[test]
+fn anthropic_tap_captures_once_on_message_delta() {
+  let stream = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1000,\"cache_read_input_tokens\":300}}}\n\n",
+    "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"x\"}}\n\n",
+    "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":250}}\n\n",
+    "data: {\"type\":\"message_stop\"}\n\n"
+  );
+  let mut tap = SseTap::new(Protocol::Anthropic);
+  let mut captured = Vec::new();
+  for chunk in stream.as_bytes().chunks(11) {
+    if let Some(u) = tap.feed(chunk) { captured.push(u); }
+  }
+  assert_eq!(captured.len(), 1);
+  assert_eq!(captured[0].input, 1000);
+  assert_eq!(captured[0].cached, 300);
+  assert_eq!(captured[0].output, 250);
+  assert!(tap.feed(b"more").is_none());
+}
+
+#[test]
+fn openai_tap_no_usage_stays_empty() {
+  let stream = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+  let mut tap = SseTap::new(Protocol::OpenAi);
+  for chunk in stream.as_bytes().chunks(7) {
+    assert!(tap.feed(chunk).is_none());
+  }
 }

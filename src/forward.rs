@@ -3,8 +3,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use reqwest::Client;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Protocol { OpenAi, Anthropic }
+pub use crate::usage::Protocol;
 
 pub struct UpstreamTarget {
   pub url: String,
