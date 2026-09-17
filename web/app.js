@@ -155,7 +155,12 @@ async function api(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   if (r.status === 401) { logout(); throw new Error(t("badKey")); }
-  if (!r.ok) { const txt = await r.text(); throw new Error(txt || r.status); }
+  if (!r.ok) {
+    const txt = await r.text();
+    let msg;
+    try { const j = JSON.parse(txt); msg = j && j.error && j.error.message; } catch (e) {}
+    throw new Error(msg || txt || String(r.status));
+  }
   return r.json();
 }
 
@@ -197,11 +202,11 @@ function bar(pct, cls) {
   return '<div class="bar ' + (cls || "") + '"><div style="width:' + p + '%"></div></div>';
 }
 function dailyBars(daily, key) {
+  // API buckets dates by UTC (substr of rfc3339 ts); build the 14 day labels in UTC too.
   const days = [];
-  const now = new Date();
+  const nowMs = Date.now();
   for (let i = 13; i >= 0; i--) {
-    const d = new Date(now); d.setDate(d.getDate() - i);
-    days.push(d.toISOString().slice(0, 10));
+    days.push(new Date(nowMs - i * 86400000).toISOString().slice(0, 10));
   }
   const map = {}; (daily || []).forEach(d => { map[d.date] = d; });
   const max = Math.max(1, ...days.map(dt => (map[dt] || {})[key] || 0));

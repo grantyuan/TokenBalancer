@@ -203,7 +203,14 @@ pub async fn admin_clear_exhausted(Path(id): Path<String>, State(st): State<AppS
 
 pub async fn admin_revoke_user(Path(key): Path<String>, State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, Response> {
   require_admin(&st, &headers)?;
-  st.runtime.store().revoke_user(&key).map_err(|_| unauthorized())?;
+  let n = st.runtime.store().revoke_user(&key).map_err(|_| unauthorized())?;
+  if n == 0 {
+    return Err(Response::builder().status(StatusCode::NOT_FOUND)
+      .header(header::CONTENT_TYPE, "application/json")
+      .body(axum::body::Body::from(
+        json!({"error": {"message": "User not found", "code": "not_found"}}).to_string(),
+      )).unwrap());
+  }
   Ok(Json(json!({"ok": true, "revoked": key})))
 }
 

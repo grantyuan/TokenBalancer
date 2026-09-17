@@ -141,7 +141,9 @@ impl Runtime {
         monthly_quota: quota,
         cycle_start,
         max_concurrent: maxc,
-        disabled: false,
+        // Only applied on the INSERT path of the upsert: an account that
+        // already exists keeps its runtime disabled/exhausted state.
+        disabled: a.disabled.unwrap_or(false),
         exhausted: false,
         reconciled_at: None,
         reconciled_remaining: None,
@@ -323,6 +325,9 @@ impl Runtime {
     if let Some(a) = self.account(id) {
       a.exhausted.store(false, Ordering::Release);
       *a.reconciled.lock().unwrap() = None;
+      // keep the DB consistent with the in-memory reset, so a restart does
+      // not resurrect a cleared reconciliation baseline
+      let _ = self.inner.store.clear_reconciled(&a.id);
       let _ = self.inner.store.set_flags(&a.id, a.disabled.load(Ordering::Acquire), false);
     }
   }

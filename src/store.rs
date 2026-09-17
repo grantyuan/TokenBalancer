@@ -62,15 +62,15 @@ impl Store {
     let c = self.conn.lock().unwrap();
     c.execute(
       "INSERT INTO accounts(id,label,api_key,region,base_url_openai,base_url_anthropic,
-         seat_tier,balance_unit,monthly_quota,cycle_start,max_concurrent)
-       VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         seat_tier,balance_unit,monthly_quota,cycle_start,max_concurrent,disabled)
+       VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
        ON CONFLICT(id) DO UPDATE SET label=excluded.label, api_key=excluded.api_key,
          region=excluded.region, base_url_openai=excluded.base_url_openai,
          base_url_anthropic=excluded.base_url_anthropic, seat_tier=excluded.seat_tier,
          balance_unit=excluded.balance_unit, monthly_quota=excluded.monthly_quota,
          cycle_start=excluded.cycle_start, max_concurrent=excluded.max_concurrent",
       params![a.id, a.label, a.api_key, a.region, a.base_url_openai, a.base_url_anthropic,
-        a.seat_tier, a.balance_unit, a.monthly_quota, a.cycle_start, a.max_concurrent as i64])?;
+        a.seat_tier, a.balance_unit, a.monthly_quota, a.cycle_start, a.max_concurrent as i64, a.disabled as i64])?;
     Ok(())
   }
 
@@ -85,6 +85,13 @@ impl Store {
     self.conn.lock().unwrap()
       .execute("UPDATE accounts SET disabled=?1, exhausted=?2 WHERE id=?3",
         params![disabled as i64, exhausted as i64, id])?;
+    Ok(())
+  }
+
+  /// Forget the reconciliation baseline for one account ("clear exhausted" semantics).
+  pub fn clear_reconciled(&self, id: &str) -> anyhow::Result<()> {
+    self.conn.lock().unwrap()
+      .execute("UPDATE accounts SET reconciled_at=NULL, reconciled_remaining=NULL WHERE id=?1", params![id])?;
     Ok(())
   }
 
@@ -118,10 +125,10 @@ impl Store {
     Ok(())
   }
 
-  pub fn revoke_user(&self, key: &str) -> anyhow::Result<()> {
-    self.conn.lock().unwrap()
-      .execute("UPDATE users SET revoked=1 WHERE key=?1", params![key])?;
-    Ok(())
+  /// Number of rows actually revoked (0 = unknown key).
+  pub fn revoke_user(&self, key: &str) -> anyhow::Result<usize> {
+    Ok(self.conn.lock().unwrap()
+      .execute("UPDATE users SET revoked=1 WHERE key=?1", params![key])?)
   }
 
   pub fn find_user_by_key(&self, key: &str) -> anyhow::Result<Option<UserRow>> {

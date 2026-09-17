@@ -75,6 +75,15 @@ async fn create_and_revoke_user() {
 }
 
 #[tokio::test]
+async fn revoke_unknown_key_is_404() {
+  // revoking a key that does not exist must be 404, not a misleading ok:true
+  let r = app().await.oneshot(Request::builder().method(Method::POST).uri("/api/admin/users/tbu_nobody/revoke")
+    .header(header::AUTHORIZATION, "Bearer tba_admin")
+    .body(Body::empty()).unwrap()).await.unwrap();
+  assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn reconcile_reflects_in_accounts() {
   let r = app().await.oneshot(Request::builder().method(Method::POST).uri("/api/admin/accounts/a1/reconcile")
     .header(header::AUTHORIZATION, "Bearer tba_admin")

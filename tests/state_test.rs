@@ -94,6 +94,41 @@ fn ev_at(account: &str, ts: chrono::DateTime<Utc>, credits: f64) -> tokenbalance
 }
 
 #[tokio::test]
+async fn config_disabled_applies_to_new_account() {
+  // config-level disabled must apply on the initial upsert (INSERT path)
+  let mut a = acct("a", SeatTier::Pro, None);
+  a.disabled = Some(true);
+  let store = Arc::new(Store::open(":memory:").unwrap());
+  let rt = Runtime::load(&cfg(vec![a]), store.clone()).await.unwrap();
+  let snaps = rt.build_snapshots().await;
+  assert!(snaps[0].disabled, "config disabled=true must disable a new account");
+  assert!(matches!(balance::select(&snaps, &mut rand::thread_rng()), Selection::NoneAvailable));
+  // existing account keeps its runtime state across re-upserts
+  rt.set_disabled("a", false).await;
+  let rt2 = Runtime::load(&cfg(vec![acct("a", SeatTier::Pro, None)]), store.clone()).await.unwrap();
+  let snaps2 = rt2.build_snapshots().await;
+  assert!(!snaps2[0].disabled, "re-upsert of an existing account must not reset runtime flags");
+}
+
+#[tokio::test]
+async fn clear_exhausted_persists_and_clears_baseline() {
+  let store = Arc::new(Store::open(":memory:").unwrap());
+  let c = cfg(vec![acct("a", SeatTier::Pro, None)]);
+  let rt = Runtime::load(&c, store.clone()).await.unwrap();
+  rt.reconcile("a", 40_000.0).await;
+  rt.mark_exhausted("a").await;
+  assert!(rt.build_snapshots().await.iter().any(|a| a.exhausted));
+  rt.clear_exhausted("a").await;
+  // baseline cleared in memory: remaining falls back to the full quota
+  assert_eq!(rt.remaining("a"), 100_000.0);
+  // a fresh runtime over the same store must not resurrect the cleared baseline
+  let rt2 = Runtime::load(&c, store.clone()).await.unwrap();
+  let snaps = rt2.build_snapshots().await;
+  assert!(!snaps[0].exhausted, "exhausted flag must be persisted as cleared");
+  assert_eq!(rt2.remaining("a"), 100_000.0, "cleared baseline must not resurrect after reload");
+}
+
+#[tokio::test]
 async fn cycle_window_ignores_previous_month_usage() {
   // day-1 anchor (explicit "2026-07-01" -> day 1, same as the default):
   // usage from a previous calendar month must not count, even though it was
