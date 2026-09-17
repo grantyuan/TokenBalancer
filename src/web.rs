@@ -121,8 +121,10 @@ pub async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> R
 pub async fn admin_users(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, Response> {
   require_admin(&st, &headers)?;
   let users = st.runtime.store().list_users().unwrap_or_default();
+  let now = Utc::now().timestamp();
   let since = crate::config::month_start_unix();
-  let by_user = st.runtime.store().group_since("user_id", since).unwrap_or_default();
+  // month-to-date: bounded to now + 1 day so future-dated rows never count
+  let by_user = st.runtime.store().group_since("user_id", since, now + 86_400).unwrap_or_default();
   let mut out = Vec::new();
   for u in users {
     let (i, _ca, o, cr, n) = by_user.iter()
@@ -143,7 +145,14 @@ pub struct CreateUser { name: String }
 pub async fn admin_create_user(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<CreateUser>) -> Result<Json<Value>, Response> {
   require_admin(&st, &headers)?;
   let key = gen_user_key();
-  st.runtime.store().create_user(&key, &body.name).map_err(|_e| unauthorized())?;
+  // A failed INSERT is a server fault (DB down, duplicate key), not an auth problem.
+  st.runtime.store().create_user(&key, &body.name).map_err(|_e| {
+    Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR)
+      .header(header::CONTENT_TYPE, "application/json")
+      .body(axum::body::Body::from(
+        json!({"error": {"message": "Failed to create user", "code": "internal_error"}}).to_string(),
+      )).unwrap()
+  })?;
   Ok(Json(json!({"key": key, "name": body.name})))
 }
 
@@ -219,8 +228,8 @@ pub async fn admin_analytics(Query(q): Query<AnalyticsQuery>, State(st): State<A
   Ok(Json(json!({
     "from": from, "to": to,
     "daily": daily,
-    "by_user": to_v(st.runtime.store().group_since("user_id", since).unwrap_or_default()),
-    "by_account": to_v(st.runtime.store().group_since("account_id", since).unwrap_or_default()),
-    "by_model": to_v(st.runtime.store().group_since("model", since).unwrap_or_default()),
+    "by_user": to_v(st.runtime.store().group_since("user_id", since, to + 1).unwrap_or_default()),
+    "by_account": to_v(st.runtime.store().group_since("account_id", since, to + 1).unwrap_or_default()),
+    "by_model": to_v(st.runtime.store().group_since("model", since, to + 1).unwrap_or_default()),
   })))
 }

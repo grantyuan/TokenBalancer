@@ -29,7 +29,8 @@ pub struct RuntimeAccount {
   pub base_url_anthropic: String,
   pub unit: Mutex<BalanceUnit>,
   pub quota: Mutex<Option<f64>>,      // in unit terms; None = unknown -> neutral pct 0.5
-  pub window_start_unix: i64,  // usage window start (cycle start)
+  pub region: Region,                // billing zone for cycle math (UTC+8 Cn, UTC Intl)
+  pub cycle_day: u32,                // day-of-month anchor of the billing cycle (1..31; 1 when unset)
   pub max_concurrent: AtomicU32,
   pub disabled: AtomicBool,
   pub exhausted: AtomicBool,
@@ -54,24 +55,59 @@ impl std::fmt::Debug for Runtime {
   }
 }
 
-/// 1st of the current month in the region's zone (UTC+8 for Cn, UTC otherwise).
-fn first_of_month(region: Region) -> i64 {
-  let now = Utc::now();
+/// Days in a calendar month (1..31).
+fn days_in_month(year: i32, month: u32) -> u32 {
+  let first = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+  let next_first = if month == 12 {
+    chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+  } else {
+    chrono::NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+  };
+  (next_first - first).num_days() as u32
+}
+
+/// (year, month) of the month preceding (year, month).
+fn prev_month(year: i32, month: u32) -> (i32, u32) {
+  if month == 1 { (year - 1, 12) } else { (year, month - 1) }
+}
+
+/// 00:00 local (region's zone: UTC+8 for Cn, UTC otherwise) unix seconds of
+/// the MOST RECENT occurrence of the cycle anchor day: the anchor day of the
+/// current month once it has passed locally, else the previous month's
+/// occurrence. An anchor day that does not exist in a month (e.g. day 31 in
+/// February) clamps to that month's last day.
+pub fn cycle_window_start(day: u32, region: Region) -> i64 {
   let off = match region {
     Region::Cn => chrono::FixedOffset::east_opt(8 * 3600).unwrap(),
     _ => chrono::FixedOffset::east_opt(0).unwrap(),
   };
-  let local = now.with_timezone(&off);
-  let first_naive = chrono::NaiveDate::from_ymd_opt(local.year(), local.month(), 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
-  off.from_local_datetime(&first_naive).unwrap().timestamp()
+  let local = Utc::now().with_timezone(&off);
+  let anchor = day.max(1);
+  let (year, month) = (local.year(), local.month());
+  let current_d = anchor.min(days_in_month(year, month));
+  if local.day() >= current_d {
+    let naive = chrono::NaiveDate::from_ymd_opt(year, month, current_d)
+      .unwrap()
+      .and_hms_opt(0, 0, 0)
+      .unwrap();
+    off.from_local_datetime(&naive).unwrap().timestamp()
+  } else {
+    let (py, pm) = prev_month(year, month);
+    let d = anchor.min(days_in_month(py, pm));
+    let naive = chrono::NaiveDate::from_ymd_opt(py, pm, d)
+      .unwrap()
+      .and_hms_opt(0, 0, 0)
+      .unwrap();
+    off.from_local_datetime(&naive).unwrap().timestamp()
+  }
 }
 
-fn parse_date_unix(s: &str) -> i64 {
-  match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-    Ok(d) => d.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp())
-      .unwrap_or_else(|| first_of_month(Region::Cn)),
-    Err(_) => first_of_month(Region::Cn),
-  }
+/// Day-of-month anchor from a "YYYY-MM-DD" cycle_start string; 1 when absent
+/// or unparseable (only the day of the anchor matters, not the year/month).
+fn parse_cycle_day(s: &str) -> u32 {
+  chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+    .map(|d| d.day())
+    .unwrap_or(1)
 }
 
 /// Consumption in the account's unit terms from a sum_since row
@@ -130,7 +166,8 @@ impl Runtime {
         base_url_anthropic: r.base_url_anthropic,
         unit: Mutex::new(unit),
         quota: Mutex::new(if r.monthly_quota > 0.0 { Some(r.monthly_quota) } else { None }),
-        window_start_unix: parse_date_unix(&r.cycle_start).max(1).min(first_of_month(region)),
+        region,
+        cycle_day: parse_cycle_day(&r.cycle_start),
         max_concurrent: AtomicU32::new(r.max_concurrent),
         disabled: AtomicBool::new(r.disabled),
         exhausted: AtomicBool::new(r.exhausted),
@@ -226,14 +263,20 @@ impl Runtime {
   /// (remaining in unit terms, remaining fraction 0..1) for one account.
   pub fn remaining_of(&self, a: &RuntimeAccount) -> (f64, f64) {
     if a.exhausted.load(Ordering::Acquire) { return (0.0, 0.0); }
+    // The cycle window start moves with the calendar: recompute it fresh on
+    // every call instead of caching a load-time value.
+    let ws = cycle_window_start(a.cycle_day, a.region);
     let window_sum = self.inner.store
-      .sum_since(&a.id, a.window_start_unix)
+      .sum_since(&a.id, ws)
       .unwrap_or((0, 0, 0, 0.0, 0));
     let unit = *a.unit.lock().unwrap();
     let consumed = unit_consumption(&unit, &window_sum);
     let quota = *a.quota.lock().unwrap();
-    let rem = match *a.reconciled.lock().unwrap() {
-      Some((at_unix, rem0)) if at_unix >= a.window_start_unix => {
+    // Copy the baseline out of the reconciled mutex before issuing any further
+    // store call, so no mutex guard is held across a blocking SQLite query.
+    let reconciled = *a.reconciled.lock().unwrap();
+    let rem = match reconciled {
+      Some((at_unix, rem0)) if at_unix >= ws => {
         // reconciliation baseline: true remaining at `at_unix`, minus what flowed after
         let post = self.inner.store.sum_since(&a.id, at_unix).unwrap_or((0, 0, 0, 0.0, 0));
         (rem0 - unit_consumption(&unit, &post)).max(0.0)

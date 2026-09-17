@@ -20,7 +20,7 @@ cp config.example.toml config.toml   # 填入各席位的 sk-sp- key、admin_key
 - 代理（OpenAI 兼容）：`http://<host>:8787/v1`
 - 代理（Anthropic 兼容）：`http://<host>:8787/apps/anthropic`
 - 管理页面：`http://<host>:8787/`
-- 健康检查：`http://<host>:8787/healthz`
+- 健康检查：`http://<host>:8787/healthz`（仅存活探测，返回 `{"status":"ok"}`；帐号详情见鉴权后的 admin API / 管理页面）
 
 ## 获取 Token Plan 团队版 Key 与 Base URL
 

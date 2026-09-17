@@ -1,6 +1,10 @@
 // tests/e2e_proxy_test.rs
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use bytes::Bytes;
+use futures_util::Stream;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::post;
@@ -14,10 +18,28 @@ const SSE_FINAL: &str = concat!(
   "data: [DONE]\n\n"
 );
 
+/// Upstream that sends a single SSE line and then stalls (no more data).
+struct StallStream { first: bool }
+
+impl Stream for StallStream {
+  type Item = Result<Bytes, reqwest::Error>;
+  fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    if self.first {
+      self.first = false;
+      let chunk = Bytes::from_static(
+        b"data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}}]\n\n",
+      );
+      Poll::Ready(Some(Ok(chunk)))
+    } else {
+      Poll::Pending // upstream went silent: no further chunks ever arrive
+    }
+  }
+}
+
 #[derive(Clone)]
 struct Mock {
   calls: Arc<std::sync::Mutex<Vec<(String, String)>>>, // (auth, path)
-  mode: Arc<std::sync::Mutex<String>>,                // "ok" | "quota-A" | "slow"
+  mode: Arc<std::sync::Mutex<String>>,                // "ok" | "quota-A" | "slow" | "stall"
 }
 
 async fn mock_handler(
@@ -41,6 +63,13 @@ async fn mock_handler(
   }
   if mode == "slow" {
     tokio::time::sleep(Duration::from_millis(300)).await;
+  }
+  if mode == "stall" && want_stream {
+    // One chunk, then silence forever — the proxy's inactivity timeout must end it.
+    return axum::response::Response::builder().status(StatusCode::OK)
+      .header(header::CONTENT_TYPE, "text/event-stream")
+      .body(Body::from_stream(StallStream { first: true }))
+      .unwrap();
   }
   if want_stream {
     return axum::response::Response::builder().status(StatusCode::OK)
@@ -68,7 +97,7 @@ fn account_conf(id: &str, key: &str, base: &str, quota: Option<f64>, maxc: u32) 
   }
 }
 
-async fn start(a_quota: Option<f64>, a_max: u32, b_quota: Option<f64>, b_max: u32) -> Harness {
+async fn start_with_inactivity(a_quota: Option<f64>, a_max: u32, b_quota: Option<f64>, b_max: u32, stream_inactivity: Duration) -> Harness {
   let mock = Mock { calls: Arc::new(std::sync::Mutex::new(Vec::new())), mode: Arc::new(std::sync::Mutex::new("ok".into())) };
   let mock_app = Router::new().route("/*rest", post(mock_handler)).with_state(mock.clone());
   let ml = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -89,7 +118,7 @@ async fn start(a_quota: Option<f64>, a_max: u32, b_quota: Option<f64>, b_max: u3
     users: vec![tokenbalancer::config::UserConf { key: "tbu_e2e".into(), name: "tester".into() }],
   };
   let runtime = tokenbalancer::state::Runtime::load(&cfg, store.clone()).await.unwrap();
-  let state = tokenbalancer::proxy::AppState { runtime, client: reqwest::Client::new(), queue_timeout: Duration::from_secs(5) };
+  let state = tokenbalancer::proxy::AppState { runtime, client: reqwest::Client::new(), queue_timeout: Duration::from_secs(5), stream_inactivity };
   let app = tokenbalancer::proxy::router(state);
   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
   let port = listener.local_addr().unwrap().port();
@@ -98,6 +127,9 @@ async fn start(a_quota: Option<f64>, a_max: u32, b_quota: Option<f64>, b_max: u3
   Harness { port, mock, store }
 }
 
+async fn start(a_quota: Option<f64>, a_max: u32, b_quota: Option<f64>, b_max: u32) -> Harness {
+  start_with_inactivity(a_quota, a_max, b_quota, b_max, Duration::from_secs(300)).await
+}
 
 async fn call(h: &Harness, path: &str, key: &str, body: Value) -> (StatusCode, String, Vec<(String, String)>) {
   let url = format!("http://127.0.0.1:{}{}", h.port, path);
@@ -199,7 +231,7 @@ async fn start_single() -> Harness {
     users: vec![tokenbalancer::config::UserConf { key: "tbu_e2e".into(), name: "t".into() }],
   };
   let runtime = tokenbalancer::state::Runtime::load(&cfg, store.clone()).await.unwrap();
-  let state = tokenbalancer::proxy::AppState { runtime, client: reqwest::Client::new(), queue_timeout: Duration::from_secs(5) };
+  let state = tokenbalancer::proxy::AppState { runtime, client: reqwest::Client::new(), queue_timeout: Duration::from_secs(5), stream_inactivity: Duration::from_secs(300) };
   let app = tokenbalancer::proxy::router(state);
   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
   let port = listener.local_addr().unwrap().port();
@@ -219,8 +251,11 @@ async fn quota_429_marks_exhausted_and_fails_over() {
   let (s2, _, calls) = call(&h, "/v1/chat/completions", "tbu_e2e", chat(false)).await;
   assert_eq!(s2, StatusCode::OK); // failed over to B
   assert_eq!(calls.last().unwrap().0, "Bearer sk-sp-B");
-  // healthz reflects exhaustion
-  let r = reqwest::get(format!("http://127.0.0.1:{}/healthz", h.port)).await.unwrap();
+  // healthz is liveness-only now; account state is exposed via the admin API
+  let r = reqwest::Client::new()
+    .get(format!("http://127.0.0.1:{}/api/admin/accounts", h.port))
+    .header(header::AUTHORIZATION, "Bearer tba_e2e")
+    .send().await.unwrap();
   let v: Value = r.json().await.unwrap();
   let a = &v["accounts"][0];
   assert_eq!(a["id"], "A");
@@ -242,4 +277,24 @@ async fn sse_stream_relay_and_usage_recorded() {
   tokio::time::sleep(Duration::from_millis(300)).await;
   let (i, _c, o, _cr, n) = h.store.totals_for("tbu_e2e", 0).unwrap();
   assert_eq!((i, o, n), (300, 150, 1));
+}
+#[tokio::test]
+async fn sse_stall_releases_slot_and_ends_stream() {
+  // upstream sends one SSE line then goes silent; with a 2s inactivity budget
+  // the relay must end, record partial usage, and release the slot
+  let h = start_with_inactivity(None, 2, None, 2, Duration::from_secs(2)).await;
+  *h.mock.mode.lock().unwrap() = "stall".into();
+  let url = format!("http://127.0.0.1:{}/v1/chat/completions", h.port);
+  let started = Instant::now();
+  let r = reqwest::Client::new().post(&url)
+    .header(header::AUTHORIZATION, "Bearer tbu_e2e")
+    .json(&chat(true)).send().await.unwrap();
+  assert_eq!(r.status(), StatusCode::OK);
+  let text = r.text().await.unwrap();
+  assert!(text.contains("delta"), "first chunk must be relayed: {text}");
+  assert!(!text.contains("usage"), "stalled stream must not carry a usage line: {text}");
+  assert!(started.elapsed() < Duration::from_secs(5), "relay must end on inactivity, not hang on the silent upstream");
+  // slot was released: a follow-up non-stream request completes
+  let (s2, _, _) = call(&h, "/v1/chat/completions", "tbu_e2e", chat(false)).await;
+  assert_eq!(s2, StatusCode::OK);
 }

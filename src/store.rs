@@ -183,14 +183,16 @@ impl Store {
     Ok(rows)
   }
 
-  /// (key, input, cached, output, credits, count) grouped by a whitelisted column, since unix ts.
-  pub fn group_since(&self, col: &str, since_unix: i64) -> anyhow::Result<Vec<(String, u64, u64, u64, f64, u64)>> {
+  /// (key, input, cached, output, credits, count) grouped by a whitelisted
+  /// column within [since_unix, to_unix).
+  pub fn group_since(&self, col: &str, since_unix: i64, to_unix: i64) -> anyhow::Result<Vec<(String, u64, u64, u64, f64, u64)>> {
     let col = match col { "user_id" | "account_id" | "model" => col, _ => return Err(anyhow::anyhow!("bad column")) };
     let since = DateTime::<Utc>::from_timestamp(since_unix, 0).unwrap_or_default().to_rfc3339();
+    let to = DateTime::<Utc>::from_timestamp(to_unix, 0).unwrap_or_default().to_rfc3339();
     let c = self.conn.lock().unwrap();
-    let sql = format!("SELECT {col}, COALESCE(SUM(input),0), COALESCE(SUM(cached),0), COALESCE(SUM(output),0), COALESCE(SUM(credits),0.0), COUNT(*) FROM usage_events WHERE ts>=?1 GROUP BY {col} ORDER BY 6 DESC");
+    let sql = format!("SELECT {col}, COALESCE(SUM(input),0), COALESCE(SUM(cached),0), COALESCE(SUM(output),0), COALESCE(SUM(credits),0.0), COUNT(*) FROM usage_events WHERE ts>=?1 AND ts<?2 GROUP BY {col} ORDER BY 6 DESC");
     let mut st = c.prepare(&sql)?;
-    let rows = st.query_map(params![since], |r| {
+    let rows = st.query_map(params![since, to], |r| {
       Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64,
          r.get::<_, i64>(3)? as u64, r.get::<_, f64>(4)?, r.get::<_, i64>(5)? as u64))
     })?.collect::<rusqlite::Result<Vec<_>>>()?;

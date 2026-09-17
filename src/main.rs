@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
         runtime,
         client,
         queue_timeout: Duration::from_secs(cfg.server.queue_timeout_secs),
+        stream_inactivity: Duration::from_secs(300),
       };
       let app = tokenbalancer::proxy::router(state)
         .layer(tower_http::cors::CorsLayer::permissive());

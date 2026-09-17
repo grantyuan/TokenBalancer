@@ -22,6 +22,11 @@ function logout() {
   $("#who").textContent = "";
 }
 
+// Escape HTML so user/admin-controllable strings are never injected as markup.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 async function connect() {
   state.key = $("#key").value.trim();
   if (!state.key) return;
@@ -67,7 +72,7 @@ function acctCard(a, withActions) {
   const quotaText = a.quota ? " · 剩余 " + fmtNum(a.remaining) + " / " + fmtNum(a.quota) : " · 剩余 " + fmtNum(a.remaining);
   return (
     '<div class="acct ' + (a.disabled ? "disabled" : "") + ' ' + (a.exhausted ? "exhausted" : "") + '">' +
-    '<div class="acct-head"><span>' + (a.label || a.id) + ' <span class="muted">(' + (a.region || "cn") + " · " + unitLabel + ")</span></span>" +
+    '<div class="acct-head"><span>' + esc(a.label || a.id) + ' <span class="muted">(' + esc(a.region || "cn") + " · " + unitLabel + ")</span></span>" +
     '<span class="muted">' + a.in_flight + "/" + a.max_concurrent + " · " + Math.round(a.remaining_pct * 100) + "%</span></div>" +
     bar(a.remaining_pct, a.exhausted ? "bad" : (a.disabled ? "off" : "ok")) +
     '<div class="tags">' +
@@ -77,10 +82,10 @@ function acctCard(a, withActions) {
     "</div>" +
     (withActions ? (
       '<div class="actions">' +
-      '<button data-act="toggle" data-id="' + a.id + '">' + (a.disabled ? "启用" : "禁用") + "</button>" +
-      '<button data-act="reconcile" data-id="' + a.id + '">对账…</button>' +
-      '<button data-act="clear" data-id="' + a.id + '">清除耗尽</button>' +
-      '<button data-act="patch" data-id="' + a.id + '">并发/额度…</button>' +
+      '<button data-act="toggle" data-id="' + esc(a.id) + '">' + (a.disabled ? "启用" : "禁用") + "</button>" +
+      '<button data-act="reconcile" data-id="' + esc(a.id) + '">对账…</button>' +
+      '<button data-act="clear" data-id="' + esc(a.id) + '">清除耗尽</button>' +
+      '<button data-act="patch" data-id="' + esc(a.id) + '">并发/额度…</button>' +
       "</div>"
     ) : "") +
     "</div>"
@@ -92,7 +97,7 @@ async function renderUser() {
   let usage, health;
   try {
     [usage, health] = await Promise.all([api("/api/me/usage"), api("/api/accounts/health")]);
-  } catch (e) { $("#view").innerHTML = '<div class="muted">' + e.message + "</div>"; return; }
+  } catch (e) { $("#view").innerHTML = '<div class="muted">' + esc(e.message) + "</div>"; return; }
   const t = usage.totals;
   const cards =
     '<div class="cards">' +
@@ -101,7 +106,7 @@ async function renderUser() {
     '<div class="card"><div class="card-label">近14天 Credits(估算)</div><div class="card-value">' + fmtNum(t.credits) + "</div></div>" +
     "</div>";
   const top = (usage.top_models || []).map(m =>
-    "<tr><td>" + m.model + "</td><td>" + m.events + "</td><td>" + fmtNum(m.tokens) + "</td><td>" + fmtNum(m.credits) + "</td></tr>").join("");
+    "<tr><td>" + esc(m.model) + "</td><td>" + m.events + "</td><td>" + fmtNum(m.tokens) + "</td><td>" + fmtNum(m.credits) + "</td></tr>").join("");
   const accounts = health.accounts.map(a => acctCard(a, false)).join("");
   $("#view").innerHTML =
     cards +
@@ -119,14 +124,14 @@ async function renderAdmin() {
   let accts, users, ana;
   try {
     [accts, users, ana] = await Promise.all([api("/api/admin/accounts"), api("/api/admin/users"), api("/api/admin/analytics")]);
-  } catch (e) { $("#view").innerHTML = '<div class="muted">' + e.message + "</div>"; return; }
+  } catch (e) { $("#view").innerHTML = '<div class="muted">' + esc(e.message) + "</div>"; return; }
   const accounts = accts.accounts.map(a => acctCard(a, true)).join("");
   const usersRows = users.users.map(u =>
     '<tr class="' + (u.revoked ? "revoked" : "") + '">' +
-    "<td>" + u.name + '</td><td class="mono">' + u.key + "</td><td>" + u.created_at.slice(0, 10) + "</td>" +
+    "<td>" + esc(u.name) + '</td><td class="mono">' + esc(u.key) + "</td><td>" + u.created_at.slice(0, 10) + "</td>" +
     "<td>" + u.month_events + "</td><td>" + fmtNum(u.month_tokens) + "</td><td>" + fmtNum(u.month_credits) + "</td>" +
-    "<td>" + (u.revoked ? "已吊销" : '<button data-revoke="' + u.key + '">吊销</button>') + "</td></tr>").join("");
-  const row = (r) => "<tr><td>" + r.key + "</td><td>" + r.events + "</td><td>" + fmtNum(r.tokens) + "</td><td>" + fmtNum(r.credits) + "</td></tr>";
+    "<td>" + (u.revoked ? "已吊销" : '<button data-revoke="' + esc(u.key) + '">吊销</button>') + "</td></tr>").join("");
+  const row = (r) => "<tr><td>" + esc(r.key) + "</td><td>" + r.events + "</td><td>" + fmtNum(r.tokens) + "</td><td>" + fmtNum(r.credits) + "</td></tr>";
   const byUser = (ana.by_user || []).slice(0, 10).map(row).join("");
   const byModel = (ana.by_model || []).slice(0, 10).map(row).join("");
   const fromDay = ana.from ? new Date(ana.from * 1000).toISOString().slice(0, 10) : "";

@@ -14,7 +14,7 @@ async fn app() -> axum::Router {
   let store = tokenbalancer::store::Store::open(":memory:").unwrap();
   let runtime = tokenbalancer::state::Runtime::load(&cfg, std::sync::Arc::new(store)).await.unwrap();
   let client = reqwest::Client::new();
-  let state = tokenbalancer::proxy::AppState { runtime, client, queue_timeout: std::time::Duration::from_secs(5) };
+  let state = tokenbalancer::proxy::AppState { runtime, client, queue_timeout: std::time::Duration::from_secs(5), stream_inactivity: std::time::Duration::from_secs(300) };
   tokenbalancer::proxy::router(state)
 }
 

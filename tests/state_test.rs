@@ -1,6 +1,6 @@
 // tests/state_test.rs
 use std::sync::Arc;
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use tokenbalancer::balance::{self, Selection};
 use tokenbalancer::config::*;
 use tokenbalancer::state::Runtime;
@@ -83,4 +83,58 @@ async fn unknown_quota_is_neutral() {
   let snaps = rt.build_snapshots().await;
   assert_eq!(snaps[0].remaining_pct, 0.5);
   assert!(matches!(balance::select(&snaps, &mut rand::thread_rng()), Selection::Chosen(0)));
+}
+/// Event with an explicit timestamp and exact credits (credits-mode accounts
+/// count the per-event credits sum; record_event would recompute credits).
+fn ev_at(account: &str, ts: chrono::DateTime<Utc>, credits: f64) -> tokenbalancer::store::UsageEvent {
+  tokenbalancer::store::UsageEvent {
+    ts, user_id: "tester".into(), account_id: account.into(), model: "seed".into(),
+    input: 0, cached: 0, output: 0, credits, latency_ms: 0, status: 200, stream: false, parse_error: false,
+  }
+}
+
+#[tokio::test]
+async fn cycle_window_ignores_previous_month_usage() {
+  // day-1 anchor (explicit "2026-07-01" -> day 1, same as the default):
+  // usage from a previous calendar month must not count, even though it was
+  // recorded while the process was running.
+  let c = AccountConf { id: "a".into(), label: None, api_key: "k".into(), region: None,
+    base_url_openai: None, base_url_anthropic: None, seat_tier: Some(SeatTier::Pro),
+    balance_unit: None, monthly_quota: None, cycle_start: Some("2026-07-01".into()),
+    max_concurrent: None, disabled: None };
+  let store = Arc::new(Store::open(":memory:").unwrap());
+  let rt = Runtime::load(&cfg(vec![c]), store.clone()).await.unwrap();
+  // 35 days ago is always in a previous calendar month (months have <= 31 days),
+  // so it must fall before the current window start on any day of the month.
+  let old_ts = Utc::now() - chrono::Duration::days(35);
+  store.insert_event(&ev_at("a", old_ts, 10_000.0)).unwrap();
+  assert_eq!(rt.remaining("a"), 100_000.0, "previous-month usage must not count");
+  // the same amount inside the current window does count
+  store.insert_event(&ev_at("a", Utc::now(), 10_000.0)).unwrap();
+  assert_eq!(rt.remaining("a"), 90_000.0, "in-window usage must count");
+}
+
+#[tokio::test]
+async fn cycle_window_mid_month_anchor() {
+  // Anchor day = 3 days before today in the account's zone (day 1..3 of the
+  // month fall back to a fixed day 3). The window start is read back from
+  // the same helper the runtime uses, so the assertions hold on any date.
+  let off = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+  let local = Utc::now().with_timezone(&off);
+  let today = local.day();
+  let anchor_day = if today >= 4 { today - 3 } else { 3 };
+  let c = AccountConf { id: "a".into(), label: None, api_key: "k".into(), region: None,
+    base_url_openai: None, base_url_anthropic: None, seat_tier: Some(SeatTier::Pro),
+    balance_unit: None, monthly_quota: None, cycle_start: Some(format!("{:04}-{:02}-{:02}", local.year(), local.month(), anchor_day)),
+    max_concurrent: None, disabled: None };
+  let store = Arc::new(Store::open(":memory:").unwrap());
+  let rt = Runtime::load(&cfg(vec![c]), store.clone()).await.unwrap();
+  let ws = tokenbalancer::state::cycle_window_start(anchor_day, Region::Cn);
+  // an event just before the window start is not counted
+  let old_ts = chrono::DateTime::<Utc>::from_timestamp(ws - 3600, 0).unwrap();
+  store.insert_event(&ev_at("a", old_ts, 10_000.0)).unwrap();
+  assert_eq!(rt.remaining("a"), 100_000.0, "event before the mid-month anchor must not count");
+  // an event now is counted
+  store.insert_event(&ev_at("a", Utc::now(), 10_000.0)).unwrap();
+  assert_eq!(rt.remaining("a"), 90_000.0, "event after the mid-month anchor must count");
 }

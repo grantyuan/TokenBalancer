@@ -1,5 +1,4 @@
 // src/proxy.rs
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +10,7 @@ use axum::routing::{any, get};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use futures_util::Stream;
+use futures_util::{Future, Stream};
 use rand::SeedableRng;
 use serde_json::{json, Value};
 use std::pin::Pin;
@@ -27,9 +26,13 @@ pub struct AppState {
   pub runtime: Arc<Runtime>,
   pub client: reqwest::Client,
   pub queue_timeout: Duration,
+  /// Abort/end the stream relay if the upstream sends nothing for this long.
+  pub stream_inactivity: Duration,
 }
 
 const MAX_BODY: usize = 10 * 1024 * 1024;
+/// Plain-body reads: no data from the upstream for this long -> 504.
+const UPSTREAM_INACTIVITY: Duration = Duration::from_secs(300);
 
 pub fn router(state: AppState) -> Router {
   Router::new()
@@ -111,20 +114,11 @@ fn record_usage_for(proto: crate::usage::Protocol, path: &str) -> bool {
   }
 }
 
-async fn healthz(State(st): State<AppState>) -> Json<Value> {
-  let mut accounts = Vec::new();
-  for a in st.runtime.iter_accounts() {
-    let (rem, pct) = st.runtime.remaining_of(&a);
-    accounts.push(json!({
-      "id": a.id, "label": a.label, "unit": format!("{:?}", *a.unit.lock().unwrap()), "quota": *a.quota.lock().unwrap(),
-      "remaining": rem, "remaining_pct": pct,
-      "in_flight": a.in_flight.load(Ordering::Acquire),
-      "max_concurrent": a.max_concurrent.load(Ordering::Acquire),
-      "disabled": a.disabled.load(Ordering::Acquire),
-      "exhausted": a.exhausted.load(Ordering::Acquire),
-    }));
-  }
-  Json(json!({"status": "ok", "accounts": accounts}))
+/// Minimal liveness probe: proves the process answers, nothing else.
+/// Account detail (remaining, in-flight, exhausted, ...) lives behind the
+/// authenticated /api/accounts/health and /api/admin/accounts endpoints.
+async fn healthz() -> Json<Value> {
+  Json(json!({"status": "ok"}))
 }
 
 async fn proxy_handler(State(st): State<AppState>, req: Request) -> Result<Response, Response> {
@@ -197,8 +191,13 @@ async fn proxy_handler(State(st): State<AppState>, req: Request) -> Result<Respo
     // ---- plain pass-through (incl. error bodies on streaming requests) ----
     let content_type = upstream.headers().get(header::CONTENT_TYPE)
       .and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_string();
-    let plain_body = upstream.bytes().await
-      .map_err(|e| json_err(StatusCode::BAD_GATEWAY, "upstream_error", &format!("Upstream read failed: {e}"), None))?;
+    let plain_body = match tokio::time::timeout(UPSTREAM_INACTIVITY, upstream.bytes()).await {
+      Ok(b) => b.map_err(|e| json_err(StatusCode::BAD_GATEWAY, "upstream_error", &format!("Upstream read failed: {e}"), None))?,
+      Err(_) => {
+        drop(slot);
+        return Err(json_err(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout", "Upstream stopped sending data.", None));
+      }
+    };
     if crate::forward::is_quota_exhausted(status, &plain_body) {
       st.runtime.mark_exhausted(&acct.id).await;
     }
@@ -238,6 +237,8 @@ async fn proxy_handler(State(st): State<AppState>, req: Request) -> Result<Respo
     model,
     status,
     started,
+    inactivity: st.stream_inactivity,
+    inactivity_timer: None,
   };
   Ok(Response::builder()
     .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
@@ -259,14 +260,30 @@ struct TapStream {
   model: String,
   status: u16,
   started: Instant,
+  /// End the relay if the upstream sends nothing for this long (releases the
+  /// slot and records partial usage).
+  inactivity: Duration,
+  /// Armed on the first Pending after the last chunk; when it fires, the
+  /// relay ends (releases the slot, records partial usage).
+  inactivity_timer: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl Stream for TapStream {
   type Item = Result<Bytes, reqwest::Error>;
 
   fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    // Inactivity deadline first: once it has fired, end the relay.
+    if let Some(t) = self.inactivity_timer.as_mut() {
+      if t.as_mut().poll(cx).is_ready() {
+        // upstream stopped sending data: end the relay cleanly (the Drop
+        // impl also finalizes if the client goes away first)
+        self.finalize();
+        return Poll::Ready(None);
+      }
+    }
     match self.inner.as_mut().poll_next(cx) {
       Poll::Ready(Some(Ok(chunk))) => {
+        self.inactivity_timer = None; // new activity: reset the deadline
         if self.usage.is_none() {
           self.usage = self.tap.feed(&chunk);
         }
@@ -274,7 +291,12 @@ impl Stream for TapStream {
       }
       Poll::Ready(x @ Some(Err(_))) => { self.finalize(); Poll::Ready(x) }
       Poll::Ready(None) => { self.finalize(); Poll::Ready(None) }
-      Poll::Pending => Poll::Pending,
+      Poll::Pending => {
+        if self.inactivity_timer.is_none() {
+          self.inactivity_timer = Some(Box::pin(tokio::time::sleep(self.inactivity)));
+        }
+        Poll::Pending
+      }
     }
   }
 }
