@@ -67,13 +67,6 @@ Usage）或官方 CLI（`qianwen usage summary --format json` → `token_plan.re
 - 余额单位可选 `tokens`（默认，来自响应 usage，自包含）或 `credits`
   （按模型费率估算，见 config `[credit_rates]`，可用对账校准）。
 
-## 安全
-
-- `config.toml` 含全部 sk-sp key 与 admin_key：**不要提交到 git**（.gitignore 已排除
-  config.local.toml；建议文件名用 config.local.toml 并 `chmod 600`）。
-- SQLite 文件（`data/`）也含 key，同样注意权限。
-- 生产部署建议置于 TLS 反向代理（Caddy/nginx）之后。
-
 ## 合规提示
 
 Token Plan 条款要求专属 Key 用于交互式 AI 工具及其发起的调用，禁止应用后端/
