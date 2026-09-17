@@ -1,87 +1,108 @@
 # TokenBalancer
 
-Qwen Token Plan 团队版 多帐号自动平衡代理。
+An auto-balancing HTTP proxy for **Qwen Token Plan Team Edition** multi-account usage.
 
-团队成员把 AI 工具的 Base URL 指向本程序、使用管理员分配的**代理 Key** 作为 API Key；
-程序按各上游帐号的**剩余额度**自动路由（余额多者优先），每帐号并发上限默认 2（可配置），
-并内置 Web 管理页面（成员看自己用量，管理员看全部帐号 + 团队分析 + 对账）。
+Point your AI tools at this proxy and use an admin-issued **proxy key** as your API key.
+The proxy routes every request to the upstream account with the most remaining quota
+(higher remaining/quota ratio wins), enforces a per-account concurrency cap (default 2,
+configurable), and ships a built-in web admin page (members see their own usage; the
+admin sees all accounts, team analytics, and quota reconciliation).
 
-## 快速开始
+## Quick start
 
 ```bash
 cargo build --release
-# 1) 复制并编辑配置
-cp config.example.toml config.toml   # 填入各席位的 sk-sp- key、admin_key、listen
-# 2) 启动
+# 1) Copy and edit the config
+cp config.example.toml config.toml   # fill in the sk-sp- keys, admin_key, listen address
+# 2) Start
 ./target/release/tokenbalancer serve config.toml
 ```
 
-启动后：
-- 代理（OpenAI 兼容）：`http://<host>:8787/v1`
-- 代理（Anthropic 兼容）：`http://<host>:8787/apps/anthropic`
-- 管理页面：`http://<host>:8787/`
-- 健康检查：`http://<host>:8787/healthz`（仅存活探测，返回 `{"status":"ok"}`；帐号详情见鉴权后的 admin API / 管理页面）
+Once running:
+- Proxy (OpenAI-compatible): `http://<host>:8787/v1`
+- Proxy (Anthropic-compatible): `http://<host>:8787/apps/anthropic`
+- Admin page: `http://<host>:8787/`
+- Health check: `http://<host>:8787/healthz` (liveness only, returns `{"status":"ok"}`;
+  account detail lives in the authenticated admin API / admin page)
 
-## 获取 Token Plan 团队版 Key 与 Base URL
+## Getting Token Plan team-edition keys and base URLs
 
-1. 在 Token Plan 管理平台购买/管理团队版订阅：
-   - 国内千问云：https://tokenplan-enterprise.qianwenai.com
-   - 国际 QwenCloud：https://tokenplan-enterprise.qwencloud.com
-2. 成员管理 → 分配席位 → 生成专属 API Key（格式 `sk-sp-xxxxx`，只显示一次）。
-3. API Key 页面查看套餐专属 Base URL（国内 `token-plan.cn-beijing.maas.aliyuncs.com`，
-   国际 `token-plan.ap-southeast-1.maas.aliyuncs.com`；程序默认已内置，一般无需改）。
+1. Purchase/manage your team subscription on the Token Plan platform:
+   - CN (Qwen Cloud): https://tokenplan-enterprise.qianwenai.com
+   - International (QwenCloud): https://tokenplan-enterprise.qwencloud.com
+2. Member management → assign a seat → generate a dedicated API key (format
+   `sk-sp-xxxxx`, shown only once).
+3. Check the plan-specific base URL on the API key page (CN:
+   `token-plan.cn-beijing.maas.aliyuncs.com`, Intl:
+   `token-plan.ap-southeast-1.maas.aliyuncs.com`; built into the proxy by default,
+   usually no change needed).
 
-鉴权方式：`Authorization: Bearer <sk-sp-...>`（不是 x-api-key）。
+Auth scheme: `Authorization: Bearer <sk-sp-...>` (not x-api-key).
 
-## 团队成员接入
+## Onboarding team members
 
-管理员在 Web 页面「成员 Key」中创建代理 Key（或在配置 `[[users]]` 中预置），
-成员在工具中配置：
+The admin creates proxy keys on the web page under "Member Keys" (or pre-seeds them in
+the config `[[users]]`). Members configure their tools with:
 
-| 工具类型 | Base URL | API Key |
+| Tool type | Base URL | API Key |
 |---|---|---|
-| OpenAI 兼容（Cursor / Qwen Code / Codex / OpenCode / Cherry Studio…） | `http://<host>:8787/v1` | 代理 Key |
-| Anthropic 兼容（Claude Code 等） | `http://<host>:8787/apps/anthropic` | 代理 Key |
+| OpenAI-compatible (Cursor / Qwen Code / Codex / OpenCode / Cherry Studio...) | `http://<host>:8787/v1` | proxy key |
+| Anthropic-compatible (Claude Code, etc.) | `http://<host>:8787/apps/anthropic` | proxy key |
 
-## 管理页面
+## Admin page
 
-- **成员视图**（代理 Key 登录）：近 14 天用量、按天趋势、常用模型、团队帐号状态（只读）。
-- **管理员视图**（admin_key 登录）：
-  - 每个帐号：剩余量条、在途并发、禁用/启用、**对账**（粘贴控制台/CLI 读到的真实剩余量）、清除耗尽、调整并发/额度；
-  - 团队分析：按天用量趋势、按成员/模型聚合；
-  - 成员 Key 管理：创建（Key 只显示一次）、吊销。
+The UI supports Chinese and English (toggle in the header; the choice is remembered in
+localStorage and defaults to your browser language).
 
-## 对账（校准剩余量）
+- **Member view** (log in with a proxy key): last-14-days usage, daily trend, top
+  models, team account status (read-only).
+- **Admin view** (log in with the admin key):
+  - Per account: remaining-amount bar, in-flight concurrency, disable/enable,
+    **reconcile** (enter the real remaining amount read from the console/CLI),
+    clear-exhausted, adjust concurrency/quota;
+  - Team analytics: daily usage trend, aggregates by member/model;
+  - Member key management: create (key shown only once), revoke.
 
-程序通过代理自身流量记账估算剩余量。要校准：在 Token Plan 控制台（Organization
-Usage）或官方 CLI（`qianwen usage summary --format json` → `token_plan.remainingCredits`）
-读取该帐号真实剩余 Credits，在管理页点击「对账…」填入。此后该帐号剩余量 =
-对账值 − 对账后的新消耗。
+## Reconciliation (calibrating remaining quota)
 
-## 平衡策略
+The proxy estimates remaining quota by self-accounting the traffic that passes through
+it. To calibrate: read the account's real remaining credits from the Token Plan
+console (Organization Usage) or the official CLI
+(`qianwen usage summary --format json` → `token_plan.remainingCredits`), then click
+"Reconcile..." on the admin page and enter the value. From that moment on, the
+account's remaining amount = reconciled value − new consumption since reconciliation.
 
-- 每个请求选择「剩余比例（remaining/quota）最高」且有并发空闲的帐号；
-- 全部满并发 → 排队（默认 5s，`queue_timeout_secs`），超时 503 + Retry-After；
-- 帐号被上游 429（AllocationQuota / insufficient_quota）判定耗尽 → 自动跳过直至
-  对账/周期开始/手动清除；
-- 余额单位可选 `tokens`（默认，来自响应 usage，自包含）或 `credits`
-  （按模型费率估算，见 config `[credit_rates]`，可用对账校准）。
+## Balancing strategy
 
-## 合规提示
+- Each request picks the account with the highest remaining ratio
+  (remaining/quota) that still has a free concurrency slot;
+- All slots busy → queue (default 5s, `queue_timeout_secs`), then 503 + Retry-After;
+- An account hit by an upstream 429 (AllocationQuota / insufficient_quota) is marked
+  exhausted and skipped until reconciliation / cycle start / manual clear;
+- Balance unit per account: `tokens` (default, taken directly from response usage)
+  or `credits` (estimated via the per-model rate table in config `[credit_rates]`,
+  calibratable through reconciliation).
 
-Token Plan 条款要求专属 Key 用于交互式 AI 工具及其发起的调用，禁止应用后端/
-批量任务等用法。本程序是团队成员**交互式工具流量**的透明转发层（不产生额外调用），
-请团队自行评估是否符合其订阅条款。
+## Compliance note
 
-## 已知限制（v1）
+Token Plan terms require dedicated keys to be used with interactive AI tools and the
+calls they initiate; application backends/batch workloads are not permitted. This
+program is a transparent forwarding layer for team members' **interactive tool
+traffic** (it generates no extra calls). Teams should evaluate compliance with their
+subscription terms themselves.
 
-- credits 费率表是近似值（官方未公开精确费率），对账可校准；
-- 流式响应中途的 4xx 不做额度耗尽检测（仅非流式错误体检测）；
-- 单实例部署（无多节点/HA）；用量统计为本地窗口（默认当月）聚合。
+## Known limitations (v1)
 
-## 开发
+- The credits rate table is an approximation (official exact rates are not public);
+  reconciliation calibrates it;
+- Mid-stream 4xx responses are not inspected for quota exhaustion (only non-streaming
+  error bodies are);
+- Single-instance deployment (no multi-node/HA); usage stats aggregate over the local
+  billing window (default: current month).
+
+## Development
 
 ```bash
-cargo test            # 全量测试（含端到端 mock 上游）
-cargo clippy          # 静态检查
+cargo test            # full test suite (includes end-to-end tests against a mock upstream)
+cargo clippy          # static checks
 ```
